@@ -1,9 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the GNU General Public License version 3.
 
+import time
 from typing import List
 
 import torch
+import torch_xla.core.xla_model as xm
 
 from llama.tokenizer import Tokenizer
 from llama.model import Transformer
@@ -21,20 +23,24 @@ class LLaMA:
         temperature: float = 0.8,
         top_p: float = 0.95,
     ) -> List[str]:
+        start_time = time.time()
         bsz = len(prompts)
         params = self.model.params
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
-        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        prompt_tokens = [self.tokenizer.encode(x, bos=False, eos=False) for x in prompts]  # the hacked tokenizer don't have bos
 
         min_prompt_size = min([len(t) for t in prompt_tokens])
         max_prompt_size = max([len(t) for t in prompt_tokens])
 
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
 
-        tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).cuda().long()
+        # tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).cuda().long()  # TODO: this line puts input to cuda device
+        tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
+        device = xm.xla_device()
+        tokens = tokens.to(device)
         input_text_mask = tokens != self.tokenizer.pad_id
         start_pos = min_prompt_size
         prev_pos = 0
@@ -52,6 +58,7 @@ class LLaMA:
             )
             tokens[:, cur_pos] = next_token
             prev_pos = cur_pos
+            xm.mark_step()
 
         decoded = []
         for i, t in enumerate(tokens.tolist()):
@@ -63,6 +70,7 @@ class LLaMA:
             except ValueError:
                 pass
             decoded.append(self.tokenizer.decode(t))
+        print(f"Generated in {time.time() - start_time:.2f} seconds")
         return decoded
 
 
@@ -70,7 +78,8 @@ def sample_top_p(probs, p):
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
-    probs_sort[mask] = 0.0
+    # probs_sort[mask] = 0.0
+    probs_sort = torch.where(mask, 0.0, probs_sort)
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)

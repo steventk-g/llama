@@ -9,36 +9,54 @@ import fire
 import time
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.metrics as met
+import torch_xla.distributed.xla_multiprocessing as xmp
 import json
-
 from pathlib import Path
 
 from llama import ModelArgs, Transformer, Tokenizer, LLaMA
+from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel_world_size
+
+
+def setup_model_parallel() -> Tuple[int, int]:
+    # assuming model parallelism over the whole world size
+    rank = get_model_parallel_rank()
+    world_size = get_model_parallel_world_size()
+
+    # seed must be the same in all processes
+    torch.manual_seed(1)
+    return rank, world_size
 
 
 def init(
     tokenizer_path: str,
+    rank: int,
+    world_size: int,
     max_seq_len: int,
     max_batch_size: int,
+    dim: int = 4096,
+    n_layers: int = 32,
+    n_heads: int = 32,
 ) -> LLaMA:
     start_time = time.time()
     # checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-    # TODO the checkpoint for large models seems to be sharded as well
     # assert world_size == len(
     #     checkpoints
     # ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {world_size}"
-    # ckpt_path = checkpoints[local_rank]
+    # ckpt_path = checkpoints[rank]
     print("Loading")
     # checkpoint = torch.load(ckpt_path, map_location="cpu")
     # with open(Path(ckpt_dir) / "params.json", "r") as f:
     #     params = json.loads(f.read())
-
+    params = {"dim": dim,
+              "n_layers": n_layers,
+              "n_heads": n_heads,
+              }
     model_args: ModelArgs = ModelArgs(
-        max_seq_len=max_seq_len, max_batch_size=max_batch_size
+        max_seq_len=max_seq_len, max_batch_size=max_batch_size, **params
     )
     tokenizer = Tokenizer(model_path=tokenizer_path)
     model_args.vocab_size = tokenizer.n_words
-    #torch.set_default_tensor_type(torch.cuda.HalfTensor)  # TODO: this line puts the model to cuda device
+    # torch.set_default_tensor_type(torch.cuda.HalfTensor)  # TODO: this line puts the model to cuda device
     torch.set_default_tensor_type(torch.BFloat16Tensor)
     model = Transformer(model_args)
     device = xm.xla_device()
@@ -57,10 +75,16 @@ def main(
     top_p: float = 0.95,
     max_seq_len: int = 512,
     max_batch_size: int = 32,
+    dim: int = 4096,
+    n_layers: int = 32,
+    n_heads: int = 32,
 ):
-    torch.manual_seed(1)
+    rank, world_size = setup_model_parallel()
+    if rank > 0:
+        sys.stdout = open(os.devnull, "w")
+
     generator = init(
-        tokenizer_path, max_seq_len, max_batch_size
+        tokenizer_path, rank, world_size, max_seq_len, max_batch_size, dim, n_layers, n_heads
     )
 
     prompts = [
@@ -90,23 +114,51 @@ def main(
 #
 #cheese =>""",
     ]
-    results = generator.generate(
-        prompts, max_gen_len=256, temperature=temperature, top_p=top_p
-    )
+    with torch.no_grad():
+        results = generator.generate(
+            prompts, max_gen_len=256, temperature=temperature, top_p=top_p
+        )
 
     for result in results:
         print(result)
         print("\n==================================\n")
 
-    results = generator.generate(
-        prompts, max_gen_len=256, temperature=temperature, top_p=top_p
-    )
+    with torch.no_grad():
+        results = generator.generate(
+            prompts, max_gen_len=256, temperature=temperature, top_p=top_p
+        )
 
     for result in results:
         print(result)
         print("\n==================================\n")
+
+
+def _fn(
+    idx,
+    tokenizer_path: str,
+    temperature: float = 0.8,
+    top_p: float = 0.95,
+    max_seq_len: int = 512,
+    max_batch_size: int = 32,
+    dim: int = 4096,
+    n_layers: int = 32,
+    n_heads: int = 32,
+):
+    main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
+
+def mp_main(
+    tokenizer_path: str,
+    temperature: float = 0.8,
+    top_p: float = 0.95,
+    max_seq_len: int = 512,
+    max_batch_size: int = 32,
+    dim: int = 4096,
+    n_layers: int = 32,
+    n_heads: int = 32,
+):
+    xmp.spawn(_fn, args=(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads))
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(mp_main)
     # print(met.metrics_report())

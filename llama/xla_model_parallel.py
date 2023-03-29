@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, Optional, Any
 
 import torch
 import torch.nn.functional as F
@@ -8,6 +8,139 @@ import torch_xla.core.xla_model as xm
 
 from fairscale.nn.model_parallel.utils import divide_and_check_no_remainder, split_tensor_along_last_dim
 
+
+def get_model_parallel_rank():
+    return xm.get_ordinal()
+
+
+def get_model_parallel_world_size():
+    return xm.xrt_world_size()
+
+
+def get_model_parallel_group():
+    return None
+
+
+# Below modified from fairscale/nn/model_parallel/mappings.py
+
+def _reduce(ctx: Any, input_: torch.Tensor) -> torch.Tensor:
+    """All-reduce the the input tensor across model parallel group."""
+    groups = get_model_parallel_group()
+
+    # if ctx:
+    #     ctx.mark_dirty(input_)
+
+    # Bypass the function if we are using only 1 GPU.
+    if get_model_parallel_world_size() == 1:
+        return input_
+
+    # All-reduce.
+    input_ = xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
+
+    return input_
+
+
+def _split(input_: torch.Tensor) -> torch.Tensor:
+    """Split the tensor along its last dimension and keep the
+    corresponding slice."""
+    # Bypass the function if we are using only 1 GPU.
+    if get_model_parallel_world_size() == 1:
+        return input_
+
+    # Split along last dimension.
+    world_size = get_model_parallel_world_size()
+    input_list = split_tensor_along_last_dim(input_, world_size)
+
+    # Note: torch.split does not create contiguous tensors by default.
+    rank = get_model_parallel_rank()
+    output = input_list[rank].contiguous()
+
+    return output
+
+
+def _gather(input_: torch.Tensor) -> torch.Tensor:
+    """Gather tensors and concatinate along the last dimension."""
+    groups = get_model_parallel_group()
+
+    # Bypass the function if we are using only 1 GPU.
+    if get_model_parallel_world_size() == 1:
+        return input_
+
+    output = xm.all_gather(input_, dim=-1, groups=groups)
+
+    return output
+
+
+class _CopyToModelParallelRegion(torch.autograd.Function):
+    """Pass the input to the model parallel region."""
+
+    @staticmethod
+    def forward(ctx, input_):  # type: ignore
+        return input_
+
+    @staticmethod
+    def backward(ctx, grad_output):  # type: ignore
+        return _reduce(None, grad_output)
+
+
+class _ReduceFromModelParallelRegion(torch.autograd.Function):
+    """All-redcue the input from the model parallel region."""
+
+    @staticmethod
+    def forward(ctx, input_):  # type: ignore
+        return _reduce(ctx, input_)
+
+    @staticmethod
+    def backward(ctx, grad_output):  # type: ignore
+        return grad_output
+
+
+class _ScatterToModelParallelRegion(torch.autograd.Function):
+    """Split the input and keep only the corresponding chuck to the rank."""
+
+    @staticmethod
+    def forward(ctx, input_):  # type: ignore
+        return _split(input_)
+
+    @staticmethod
+    def backward(ctx, grad_output):  # type: ignore
+        return _gather(grad_output)
+
+
+class _GatherFromModelParallelRegion(torch.autograd.Function):
+    """Gather the input from model parallel region and concatinate."""
+
+    @staticmethod
+    def forward(ctx, input_):  # type: ignore
+        return _gather(input_)
+
+    @staticmethod
+    def backward(ctx, grad_output):  # type: ignore
+        return _split(grad_output)
+
+
+# -----------------
+# Helper functions.
+# -----------------
+
+
+def copy_to_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
+    return _CopyToModelParallelRegion.apply(input_)
+
+
+def reduce_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
+    return _ReduceFromModelParallelRegion.apply(input_)
+
+
+def scatter_to_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
+    return _ScatterToModelParallelRegion.apply(input_)
+
+
+def gather_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
+    return _GatherFromModelParallelRegion.apply(input_)
+
+
+# Below copied from fairscale/nn/model_parallel/layers.py
 
 def _initialize_affine_weight(
     weight: torch.Tensor,
@@ -47,58 +180,6 @@ def _initialize_affine_weight(
     if return_master_weight:
         return master_weight
     return None
-
-
-def get_model_parallel_rank():
-    return xm.get_ordinal()
-
-
-def get_model_parallel_world_size():
-    return xm.xrt_world_size()
-
-
-def copy_to_model_parallel_region(input_):
-    return input_
-
-
-def gather_from_model_parallel_region(input_):
-    """Gather tensors and concatinate along the last dimension."""
-    world_size = xm.xrt_world_size()
-    if world_size == 1:
-        return input_
-
-    output = xm.all_gather(input_, dim=-1)
-
-    return output
-
-
-def scatter_to_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    """Split the tensor along its last dimension and keep the
-    corresponding slice."""
-    world_size = xm.xrt_world_size()
-    if world_size == 1:
-        return input_
-
-    # Split along last dimension.
-    input_list = split_tensor_along_last_dim(input_, world_size)
-
-    # Note: torch.split does not create contiguous tensors by default.
-    rank = get_model_parallel_rank()
-    output = input_list[rank].contiguous()
-
-    return output
-
-
-def reduce_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    """All-reduce the the input tensor across model parallel group."""
-    world_size = xm.xrt_world_size()
-    if world_size == 1:
-        return input_
-
-    # All-reduce.
-    input_ = xm.all_reduce(xm.REDUCE_SUM, input_)
-
-    return input_
 
 
 class ParallelEmbedding(torch.nn.Module):
@@ -165,7 +246,7 @@ class ParallelEmbedding(torch.nn.Module):
         )
         output = gather_from_model_parallel_region(output_parallel)
         return output
-    
+
 
 class ColumnParallelLinear(torch.nn.Module):
     """Linear layer with column parallelism.

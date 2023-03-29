@@ -97,7 +97,15 @@ def main(
         print(result)
         print("\n==================================\n")
 
+    results = generator.generate(
+        prompts, max_gen_len=256, temperature=temperature, top_p=top_p
+    )
+
+    for result in results:
+        print(result)
+        print("\n==================================\n")
+
 
 if __name__ == "__main__":
     fire.Fire(main)
-    print(met.metrics_report())
+    # print(met.metrics_report())

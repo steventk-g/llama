@@ -24,6 +24,8 @@ class LLaMA:
         top_p: float = 0.95,
     ) -> List[str]:
         start_time = time.time()
+        input_prepare_start_time = time.time()
+
         bsz = len(prompts)
         params = self.model.params
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
@@ -33,10 +35,11 @@ class LLaMA:
         min_prompt_size = min([len(t) for t in prompt_tokens])
         max_prompt_size = max([len(t) for t in prompt_tokens])
 
-        total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
+        # total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
+        total_len = params.max_seq_len
 
         # tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).cuda().long()  # TODO: this line puts input to cuda device
-        tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).long()
+        tokens = torch.full((params.max_batch_size, total_len), self.tokenizer.pad_id).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
         device = xm.xla_device()
@@ -44,8 +47,16 @@ class LLaMA:
         input_text_mask = tokens != self.tokenizer.pad_id
         start_pos = min_prompt_size
         prev_pos = 0
+        print(f"Input prepared in {time.time() - input_prepare_start_time:.2f} seconds")
+
+        decoding_start_time = time.time()
         for cur_pos in range(start_pos, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            token_start_time = time.time()
+            cur_pos_tensor = torch.tensor(cur_pos).to(device)
+            output_pos_tensor = torch.tensor(cur_pos - 1).to(device)
+            input_pos_tensor = torch.arange(prev_pos, cur_pos).to(device)
+            input_tokens = tokens.index_select(1, input_pos_tensor)
+            logits = self.model.forward(input_tokens, prev_pos, input_pos_tensor, output_pos_tensor)
             if temperature > 0:
                 probs = torch.softmax(logits / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -53,15 +64,24 @@ class LLaMA:
                 next_token = torch.argmax(logits, dim=-1)
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
+            input_text_mask_tmp = input_text_mask.index_select(1, cur_pos_tensor).squeeze(dim=1)
+            tokens_tmp = tokens.index_select(1, cur_pos_tensor).squeeze(dim=1)
             next_token = torch.where(
-                input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
+                input_text_mask_tmp, tokens_tmp, next_token
             )
-            tokens[:, cur_pos] = next_token
+            # tokens[:, cur_pos] = next_token
+            next_token = next_token.unsqueeze(1)
+            tokens.index_copy_(1, cur_pos_tensor, next_token)
             prev_pos = cur_pos
             xm.mark_step()
+            print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
+        print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")
 
+        output_prepare_start_time = time.time()
         decoded = []
         for i, t in enumerate(tokens.tolist()):
+            if i >= len(prompt_tokens):
+                break
             # cut to max gen len
             t = t[: len(prompt_tokens[i]) + max_gen_len]
             # cut to eos tok if any
@@ -70,7 +90,8 @@ class LLaMA:
             except ValueError:
                 pass
             decoded.append(self.tokenizer.decode(t))
-        print(f"Generated in {time.time() - start_time:.2f} seconds")
+        print(f"Detokenized ouput in {time.time() - output_prepare_start_time:.2f} seconds")
+        print(f"Completed in {time.time() - start_time:.2f} seconds")
         return decoded
 
 

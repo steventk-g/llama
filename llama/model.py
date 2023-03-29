@@ -19,9 +19,9 @@ from fairscale.nn.model_parallel.layers import (
 
 @dataclass
 class ModelArgs:
-    dim: int = 512
-    n_layers: int = 8
-    n_heads: int = 8
+    dim: int = 2048
+    n_layers: int = 16
+    n_heads: int = 16
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
@@ -102,14 +102,20 @@ class Attention(nn.Module):
             bias=False,
         )
 
-        self.cache_k = torch.zeros(
+        # self.cache_k = torch.zeros(
+        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+        # )
+        # self.cache_v = torch.zeros(
+        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+        # )
+        self.register_buffer("cache_k", torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        )
-        self.cache_v = torch.zeros(
+        ))
+        self.register_buffer("cache_v", torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        )
+        ))
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -119,14 +125,18 @@ class Attention(nn.Module):
 
         # xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        # self.cache_k = self.cache_k.to(xq)
+        # self.cache_v = self.cache_v.to(xq)
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        self.cache_k.index_copy_(1, input_idexes, xk)
+        self.cache_v.index_copy_(1, input_idexes, xv)
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+        # keys = self.cache_k[:bsz, : start_pos + seqlen]
+        # values = self.cache_v[:bsz, : start_pos + seqlen]
+        keys = self.cache_k[:, :]
+        values = self.cache_v[:, :]
 
         xq = xq.transpose(1, 2)
         keys = keys.transpose(1, 2)
@@ -182,8 +192,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
-        h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
+        h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask, input_idexes)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -212,21 +222,30 @@ class Transformer(nn.Module):
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
 
+        mask = torch.full((1, 1, self.params.max_seq_len, self.params.max_seq_len), float("-inf")).to(torch.float)
+        mask = torch.triu(mask, diagonal=1)
+        self.register_buffer("mask", mask)
+
     @torch.no_grad()
-    def forward(self, tokens: torch.Tensor, start_pos: int):
-        _bsz, seqlen = tokens.shape
+    def forward(self, tokens: torch.Tensor, start_pos: int, input_idexes: torch.Tensor, output_idex: torch.Tensor):
+        bsz, seqlen = tokens.shape
+        assert bsz == self.params.max_batch_size
         # print(tokens)
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        # freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        freqs_cis = self.freqs_cis.index_select(0, input_idexes)
 
-        mask = None
-        if seqlen > 1:
-            mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
-            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
+        # mask = None
+        # if seqlen > 1:
+            # mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
+            # mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
+        mask = self.mask.index_select(2, input_idexes)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h = layer(h, start_pos, freqs_cis, mask, input_idexes)
         h = self.norm(h)
-        output = self.output(h[:, -1, :])  # only compute last logits
+        h = h.index_select(1, output_idex - input_idexes[0]).squeeze(dim=1)
+        # output = self.output(h[:, -1, :])  # only compute last logits
+        output = self.output(h)
         return output.float()

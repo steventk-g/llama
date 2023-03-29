@@ -147,6 +147,7 @@ def _fn(
     main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
 
 def mp_main(
+    mp: bool,
     tokenizer_path: str,
     temperature: float = 0.8,
     top_p: float = 0.95,
@@ -156,7 +157,10 @@ def mp_main(
     n_layers: int = 32,
     n_heads: int = 32,
 ):
-    xmp.spawn(_fn, args=(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads))
+    if mp:
+        xmp.spawn(_fn, args=(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads))
+    else:
+        main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
 
 
 if __name__ == "__main__":

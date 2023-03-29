@@ -58,6 +58,7 @@ def main(
     max_seq_len: int = 512,
     max_batch_size: int = 32,
 ):
+    torch.manual_seed(1)
     generator = init(
         tokenizer_path, max_seq_len, max_batch_size
     )

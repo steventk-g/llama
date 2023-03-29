@@ -19,9 +19,9 @@ from fairscale.nn.model_parallel.layers import (
 
 @dataclass
 class ModelArgs:
-    dim: int = 2048
-    n_layers: int = 16
-    n_heads: int = 16
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
@@ -115,7 +115,7 @@ class Attention(nn.Module):
             (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
         ))
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -142,8 +142,7 @@ class Attention(nn.Module):
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
+        scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, slen, head_dim)
         output = output.transpose(
@@ -192,8 +191,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
-        h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask, input_idexes)
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
+        h = x + self.attention.forward(self.attention_norm(x), freqs_cis, mask, input_idexes)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -227,7 +226,7 @@ class Transformer(nn.Module):
         self.register_buffer("mask", mask)
 
     @torch.no_grad()
-    def forward(self, tokens: torch.Tensor, start_pos: int, input_idexes: torch.Tensor, output_idex: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, input_idexes: torch.Tensor, output_idex: torch.Tensor):
         bsz, seqlen = tokens.shape
         assert bsz == self.params.max_batch_size
         # print(tokens)
@@ -243,7 +242,7 @@ class Transformer(nn.Module):
         mask = self.mask.index_select(2, input_idexes)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask, input_idexes)
+            h = layer(h, freqs_cis, mask, input_idexes)
         h = self.norm(h)
         h = h.index_select(1, output_idex - input_idexes[0]).squeeze(dim=1)
         # output = self.output(h[:, -1, :])  # only compute last logits

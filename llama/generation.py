@@ -45,18 +45,18 @@ class LLaMA:
         device = xm.xla_device()
         tokens = tokens.to(device)
         input_text_mask = tokens != self.tokenizer.pad_id
-        start_pos = min_prompt_size
-        prev_pos = 0
+        # start_pos = min_prompt_size
+        start_pos = 1
+        cur_pos_tensor = torch.tensor(start_pos).to(device)
+        input_pos_tensor = torch.arange(0, start_pos).to(device)
+        xm.mark_step()
         print(f"Input prepared in {time.time() - input_prepare_start_time:.2f} seconds")
-
         decoding_start_time = time.time()
-        for cur_pos in range(start_pos, total_len):
+        for _ in range(start_pos, total_len):
             token_start_time = time.time()
-            cur_pos_tensor = torch.tensor(cur_pos).to(device)
-            output_pos_tensor = torch.tensor(cur_pos - 1).to(device)
-            input_pos_tensor = torch.arange(prev_pos, cur_pos).to(device)
+            output_pos_tensor = cur_pos_tensor - 1
             input_tokens = tokens.index_select(1, input_pos_tensor)
-            logits = self.model.forward(input_tokens, prev_pos, input_pos_tensor, output_pos_tensor)
+            logits = self.model.forward(input_tokens, input_pos_tensor, output_pos_tensor)
             if temperature > 0:
                 probs = torch.softmax(logits / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -72,7 +72,8 @@ class LLaMA:
             # tokens[:, cur_pos] = next_token
             next_token = next_token.unsqueeze(1)
             tokens.index_copy_(1, cur_pos_tensor, next_token)
-            prev_pos = cur_pos
+            input_pos_tensor = input_pos_tensor[-1:] + 1
+            cur_pos_tensor += 1
             xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
         print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")

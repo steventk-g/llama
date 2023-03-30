@@ -16,12 +16,13 @@ class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
-        self._generate_one_token_fn = self._generate_one_token
+        #self._generate_one_token_fn = self._generate_one_token
+        self._generate_one_token_fn = torch.compile(backend="torchxla_trace_once")(self._generate_one_token)
 
     def _generate_one_token(self, tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p):
         output_pos_tensor = cur_pos_tensor - 1
         input_tokens = tokens.index_select(1, input_pos_tensor)
-        logits = self.model.forward(input_tokens, input_pos_tensor, output_pos_tensor)
+        logits = self.model(input_tokens, input_pos_tensor, output_pos_tensor)
         if temperature > 0:
             probs = torch.softmax(logits / temperature, dim=-1)
             next_token = sample_top_p(probs, top_p)
@@ -80,8 +81,8 @@ class LLaMA:
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
-            with xp.Trace('trace_generate_one_token'):
-                tokens, cur_pos_tensor, input_pos_tensor = self._generate_one_token_fn(tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p)
+            # with xp.Trace('trace_generate_one_token'):
+            tokens, cur_pos_tensor, input_pos_tensor = self._generate_one_token_fn(tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p)
             xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
         print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")

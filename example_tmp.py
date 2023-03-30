@@ -9,6 +9,7 @@ import fire
 import time
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.metrics as met
+import torch_xla.debug.profiler as xp
 import torch_xla.distributed.xla_multiprocessing as xmp
 import json
 from pathlib import Path
@@ -79,6 +80,7 @@ def main(
     n_layers: int = 32,
     n_heads: int = 32,
 ):
+    server = xp.start_server(9012, only_on_master=False)
     rank, world_size = setup_model_parallel()
     if rank > 0:
         sys.stdout = open(os.devnull, "w")

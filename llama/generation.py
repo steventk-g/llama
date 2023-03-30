@@ -6,6 +6,7 @@ from typing import List
 
 import torch
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
 
 from llama.tokenizer import Tokenizer
 from llama.model import Transformer
@@ -15,6 +16,31 @@ class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
+        self._generate_one_token_fn = self._generate_one_token
+
+    def _generate_one_token(self, tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p):
+        output_pos_tensor = cur_pos_tensor - 1
+        input_tokens = tokens.index_select(1, input_pos_tensor)
+        logits = self.model(input_tokens, input_pos_tensor, output_pos_tensor)
+        if temperature > 0:
+            probs = torch.softmax(logits / temperature, dim=-1)
+            next_token = sample_top_p(probs, top_p)
+        else:
+            next_token = torch.argmax(logits, dim=-1)
+        next_token = next_token.reshape(-1)
+        # only replace token if prompt has already been generated
+        input_text_mask_tmp = input_text_mask.index_select(1, cur_pos_tensor).squeeze(dim=1)
+        tokens_tmp = tokens.index_select(1, cur_pos_tensor).squeeze(dim=1)
+        next_token = torch.where(
+            input_text_mask_tmp, tokens_tmp, next_token
+        )
+        # tokens[:, cur_pos] = next_token
+        next_token = next_token.unsqueeze(1)
+        tokens.index_copy_(1, cur_pos_tensor, next_token)
+        input_pos_tensor = input_pos_tensor[-1:] + 1
+        cur_pos_tensor += 1
+
+        return tokens, cur_pos_tensor, input_pos_tensor
 
     def generate(
         self,
@@ -54,26 +80,8 @@ class LLaMA:
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
-            output_pos_tensor = cur_pos_tensor - 1
-            input_tokens = tokens.index_select(1, input_pos_tensor)
-            logits = self.model.forward(input_tokens, input_pos_tensor, output_pos_tensor)
-            if temperature > 0:
-                probs = torch.softmax(logits / temperature, dim=-1)
-                next_token = sample_top_p(probs, top_p)
-            else:
-                next_token = torch.argmax(logits, dim=-1)
-            next_token = next_token.reshape(-1)
-            # only replace token if prompt has already been generated
-            input_text_mask_tmp = input_text_mask.index_select(1, cur_pos_tensor).squeeze(dim=1)
-            tokens_tmp = tokens.index_select(1, cur_pos_tensor).squeeze(dim=1)
-            next_token = torch.where(
-                input_text_mask_tmp, tokens_tmp, next_token
-            )
-            # tokens[:, cur_pos] = next_token
-            next_token = next_token.unsqueeze(1)
-            tokens.index_copy_(1, cur_pos_tensor, next_token)
-            input_pos_tensor = input_pos_tensor[-1:] + 1
-            cur_pos_tensor += 1
+            with xp.Trace('trace_generate_one_token'):
+                tokens, cur_pos_tensor, input_pos_tensor = self._generate_one_token_fn(tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p)
             xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
         print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")

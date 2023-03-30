@@ -217,9 +217,10 @@ class Transformer(nn.Module):
             params.dim, params.vocab_size, bias=False
         )
 
-        self.freqs_cis = precompute_freqs_cis(
+        freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
+        self.register_buffer("freqs_cis", freqs_cis)
 
         mask = torch.full((1, 1, self.params.max_seq_len, self.params.max_seq_len), float("-inf")).to(torch.float)
         mask = torch.triu(mask, diagonal=1)
@@ -231,7 +232,7 @@ class Transformer(nn.Module):
         assert bsz == self.params.max_batch_size
         # print(tokens)
         h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
+        # self.freqs_cis = self.freqs_cis.to(h.device)
         # freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         freqs_cis = self.freqs_cis.index_select(0, input_idexes)
 

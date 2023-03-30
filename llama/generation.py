@@ -76,14 +76,16 @@ class LLaMA:
         start_pos = 1
         cur_pos_tensor = torch.tensor(start_pos).to(device)
         input_pos_tensor = torch.arange(0, start_pos).to(device)
-        xm.mark_step()
+        xm.mark_step(wait=True)
+        xm.wait_device_ops()
         print(f"Input prepared in {time.time() - input_prepare_start_time:.2f} seconds")
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
             # with xp.Trace('trace_generate_one_token'):
             tokens, cur_pos_tensor, input_pos_tensor = self._generate_one_token_fn(tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p)
-            xm.mark_step()
+            xm.mark_step(wait=True)
+            xm.wait_device_ops()
             print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
         print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")
 

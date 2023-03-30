@@ -16,12 +16,11 @@ class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
-        #self._generate_one_token_fn = self._generate_one_token
-        self._generate_one_token_fn = torch.compile(backend="torchxla_trace_once")(self._generate_one_token)
+        self._generate_one_token_fn = self._generate_one_token
+        #self._generate_one_token_fn = torch.compile(backend="torchxla_trace_once")(self._generate_one_token)
+        self.model = torch.compile(self.model, backend="torchxla_trace_once")
 
-    def _generate_one_token(self, tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p):
-        output_pos_tensor = cur_pos_tensor - 1
-        input_tokens = tokens.index_select(1, input_pos_tensor)
+    def _generate_one_token(self, tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, temperature, top_p):
         logits = self.model(input_tokens, input_pos_tensor, output_pos_tensor)
         if temperature > 0:
             probs = torch.softmax(logits / temperature, dim=-1)
@@ -40,8 +39,10 @@ class LLaMA:
         tokens.index_copy_(1, cur_pos_tensor, next_token)
         input_pos_tensor = input_pos_tensor[-1:] + 1
         cur_pos_tensor += 1
+        output_pos_tensor = cur_pos_tensor - 1
+        input_tokens = tokens.index_select(1, input_pos_tensor)
 
-        return tokens, cur_pos_tensor, input_pos_tensor
+        return tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor
 
     def generate(
         self,
@@ -76,16 +77,16 @@ class LLaMA:
         start_pos = 1
         cur_pos_tensor = torch.tensor(start_pos).to(device)
         input_pos_tensor = torch.arange(0, start_pos).to(device)
+        output_pos_tensor = cur_pos_tensor - 1
+        input_tokens = tokens.index_select(1, input_pos_tensor)
         xm.mark_step(wait=True)
-        xm.wait_device_ops()
         print(f"Input prepared in {time.time() - input_prepare_start_time:.2f} seconds")
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
             # with xp.Trace('trace_generate_one_token'):
-            tokens, cur_pos_tensor, input_pos_tensor = self._generate_one_token_fn(tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, temperature, top_p)
-            xm.mark_step(wait=True)
-            xm.wait_device_ops()
+            tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor = self._generate_one_token_fn(tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, temperature, top_p)
+            xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
         print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")
 

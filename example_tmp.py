@@ -16,6 +16,10 @@ from pathlib import Path
 
 from llama import ModelArgs, Transformer, Tokenizer, LLaMA
 
+# TODO(yeounoh) import packages for PyTorch/XLA GSPMD
+import numpy as np
+import torch_xla.experimental.xla_sharding as xs
+import torch_xla.experimental.pjrt as pjrt
 
 def init(
     tokenizer_path: str,
@@ -53,6 +57,29 @@ def init(
     torch.set_default_tensor_type(torch.FloatTensor)
     # model.load_state_dict(checkpoint, strict=False)
 
+    num_devices = pjrt.global_device_count()
+    device_ids = np.arange(num_devices)
+
+    # TODO(yeounoh) Use PyTorch/XLA SPMD instead of
+    # `fairscale.nn.model_parallel.layers` in the Transformer module
+    col_mesh = xs.Mesh(device_ids, (1, num_devices))
+    row_mesh = xs.Mesh(device_ids, (num_devices, 1))
+    for name, layer in model.named_modules():
+        if 'tok_embeddings' in name:
+            xs.mark_sharding(layer.weight, row_mesh, (0, 1))
+        if 'attention.' in name:
+            if 'wo' in name:
+                xs.mark_sharding(layer.weight, row_mesh, (0, 1))
+            else:
+                xs.mark_sharding(layer.weight, col_mesh, (0, 1))
+        if 'feed_forward.' in name:
+            if 'w2' in name:
+                xs.mark_sharding(layer.weight, row_mesh, (0, 1))
+            else:
+                xs.mark_sharding(layer.weight, col_mesh, (0, 1))
+        if 'output' in name:
+            xs.mark_sharding(layer.weight, col_mesh, (0, 1))
+
     generator = LLaMA(model, tokenizer)
     print(f"Loaded in {time.time() - start_time:.2f} seconds")
     return generator
@@ -77,8 +104,8 @@ def main(
     prompts = [
         # For these prompts, the expected answer is the natural continuation of the prompt
         "I believe the meaning of life is",
-        "Simply put, the theory of relativity states that ",
-        "Building a website can be done in 10 simple steps:\n",
+        #"Simply put, the theory of relativity states that ",
+        #"Building a website can be done in 10 simple steps:\n",
         # Few shot prompts: https://huggingface.co/blog/few-shot-learning-gpt-neo-and-inference-api
 #        """Tweet: "I hate it when my phone battery dies."
 #Sentiment: Negative
@@ -106,18 +133,14 @@ def main(
             prompts, max_gen_len=256, temperature=temperature, top_p=top_p
         )
 
-    for result in results:
-        print(result)
-        print("\n==================================\n")
-
     with torch.no_grad():
         results = generator.generate(
             prompts, max_gen_len=256, temperature=temperature, top_p=top_p
         )
-
-    for result in results:
-        print(result)
-        print("\n==================================\n")
+    if xm.is_master_ordinal(local=False):
+      for result in results:
+          print(result)
+          print("\n==================================\n")
 
 
 if __name__ == "__main__":

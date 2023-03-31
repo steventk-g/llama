@@ -75,20 +75,22 @@ class _CopyToModelParallelRegion(torch.autograd.Function):
     """Pass the input to the model parallel region."""
 
     @staticmethod
-    def forward(ctx, input_):  # type: ignore
+    def forward(ctx, input_, groups, world_size, rank):  # type: ignore
+        ctx.groups, ctx.world_size, ctx.rank = groups, world_size, rank
         return input_
 
     @staticmethod
     def backward(ctx, grad_output):  # type: ignore
-        return _reduce(None, grad_output)
+        groups, world_size, rank = ctx.groups, ctx.world_size, ctx.rank
+        return my_reduce(grad_output, groups, world_size, rank)
 
 
 class _ReduceFromModelParallelRegion(torch.autograd.Function):
     """All-redcue the input from the model parallel region."""
 
     @staticmethod
-    def forward(ctx, input_):  # type: ignore
-        return _reduce(ctx, input_)
+    def forward(ctx, input_, groups, world_size, rank):  # type: ignore
+        return my_reduce(input_, groups, world_size, rank)
 
     @staticmethod
     def backward(ctx, grad_output):  # type: ignore
@@ -99,24 +101,28 @@ class _ScatterToModelParallelRegion(torch.autograd.Function):
     """Split the input and keep only the corresponding chuck to the rank."""
 
     @staticmethod
-    def forward(ctx, input_):  # type: ignore
-        return _split(input_)
+    def forward(ctx, input_, groups, world_size, rank):  # type: ignore
+        ctx.groups, ctx.world_size, ctx.rank = groups, world_size, rank
+        return my_split(input_, groups, world_size, rank)
 
     @staticmethod
     def backward(ctx, grad_output):  # type: ignore
-        return _gather(grad_output)
+        groups, world_size, rank = ctx.groups, ctx.world_size, ctx.rank
+        return my_gather(grad_output, groups, world_size, rank)
 
 
 class _GatherFromModelParallelRegion(torch.autograd.Function):
     """Gather the input from model parallel region and concatinate."""
 
     @staticmethod
-    def forward(ctx, input_):  # type: ignore
-        return _gather(input_)
+    def forward(ctx, input_, groups, world_size, rank):  # type: ignore
+        ctx.groups, ctx.world_size, ctx.rank = groups, world_size, rank
+        return my_gather(input_, groups, world_size, rank)
 
     @staticmethod
     def backward(ctx, grad_output):  # type: ignore
-        return _split(grad_output)
+        groups, world_size, rank = ctx.groups, ctx.world_size, ctx.rank
+        return my_split(grad_output, groups, world_size, rank)
 
 
 # -----------------
@@ -124,27 +130,62 @@ class _GatherFromModelParallelRegion(torch.autograd.Function):
 # -----------------
 
 
-def copy_to_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    # return _CopyToModelParallelRegion.apply(input_)
-    return input_
+def copy_to_model_parallel_region(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    return _CopyToModelParallelRegion.apply(input_, groups, world_size, rank)
 
 
-def reduce_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    # return _ReduceFromModelParallelRegion.apply(input_)
-    return _reduce(None, input_)
+def reduce_from_model_parallel_region(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    return _ReduceFromModelParallelRegion.apply(input_, groups, world_size, rank)
 
 
-def scatter_to_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    # return _ScatterToModelParallelRegion.apply(input_)
-    return _split(input_)
+def scatter_to_model_parallel_region(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    return _ScatterToModelParallelRegion.apply(input_, groups, world_size, rank)
 
 
-def gather_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    # return _GatherFromModelParallelRegion.apply(input_)
-    return _gather(input_)
+def gather_from_model_parallel_region(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    return _GatherFromModelParallelRegion.apply(input_, groups, world_size, rank)
 
 
 # Below copied from fairscale/nn/model_parallel/layers.py
+
+def my_reduce(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    """All-reduce the the input tensor across model parallel group."""
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_
+
+    # All-reduce.
+    input_ = xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
+
+    return input_
+
+
+def my_split(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    """Split the tensor along its last dimension and keep the
+    corresponding slice."""
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_
+
+    # Split along last dimension.
+    input_list = split_tensor_along_last_dim(input_, world_size)
+
+    # Note: torch.split does not create contiguous tensors by default.
+    output = input_list[rank].contiguous()
+
+    return output
+
+
+def my_gather(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
+    """Gather tensors and concatinate along the last dimension."""
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_
+
+    output = xm.all_gather(input_, dim=-1, groups=groups)
+
+    return output
+
 
 def _initialize_affine_weight(
     weight: torch.Tensor,
@@ -236,9 +277,12 @@ class ParallelEmbedding(torch.nn.Module):
             stride=1,
             return_master_weight=False,
         )
+        self.groups = get_model_parallel_group()
+        self.world_size = get_model_parallel_world_size()
+        self.rank = get_model_parallel_rank()
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
-        input_parallel = copy_to_model_parallel_region(input_)
+        input_parallel = copy_to_model_parallel_region(input_, self.groups, self.world_size, self.rank)
         output_parallel = F.embedding(
             input_parallel,
             self.weight,
@@ -248,7 +292,7 @@ class ParallelEmbedding(torch.nn.Module):
             self.scale_grad_by_freq,
             self.sparse,
         )
-        output = gather_from_model_parallel_region(output_parallel)
+        output = gather_from_model_parallel_region(output_parallel, self.groups, self.world_size, self.rank)
         return output
 
 
@@ -316,18 +360,21 @@ class ColumnParallelLinear(torch.nn.Module):
             stride=stride,
             return_master_weight=keep_master_weight_for_test,
         )
+        self.groups = get_model_parallel_group()
+        self.world_size = get_model_parallel_world_size()
+        self.rank = get_model_parallel_rank()
 
     def get_master_weight(self) -> torch.Tensor:
-        return gather_from_model_parallel_region(self.weight.data.transpose(0, 1)).transpose_(0, 1)
+        return gather_from_model_parallel_region(self.weight.data.transpose(0, 1), self.groups, self.world_size, self.rank).transpose_(0, 1)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
         # Set up backprop all-reduce.
-        input_parallel = copy_to_model_parallel_region(input_)
+        input_parallel = copy_to_model_parallel_region(input_, self.groups, self.world_size, self.rank)
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight, self.bias)
         if self.gather_output:
             # All-gather across the partitions.
-            output = gather_from_model_parallel_region(output_parallel)
+            output = gather_from_model_parallel_region(output_parallel, self.groups, self.world_size, self.rank)
         else:
             output = output_parallel
         return output
@@ -403,20 +450,23 @@ class RowParallelLinear(torch.nn.Module):
             stride=stride,
             return_master_weight=keep_master_weight_for_test,
         )
+        self.groups = get_model_parallel_group()
+        self.world_size = get_model_parallel_world_size()
+        self.rank = get_model_parallel_rank()
 
     def get_master_weight(self) -> torch.Tensor:
-        return gather_from_model_parallel_region(self.weight.data)
+        return gather_from_model_parallel_region(self.weight.data, self.groups, self.world_size, self.rank)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type:ignore
         # Set up backprop all-reduce.
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            input_parallel = scatter_to_model_parallel_region(input_)
+            input_parallel = scatter_to_model_parallel_region(input_, self.groups, self.world_size, self.rank)
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight)
         # All-reduce across all the partitions.
-        output_ = reduce_from_model_parallel_region(output_parallel)
+        output_ = reduce_from_model_parallel_region(output_parallel, self.groups, self.world_size, self.rank)
         if self.bias is not None:
             output = output_ + self.bias
         else:

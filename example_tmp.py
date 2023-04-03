@@ -62,6 +62,8 @@ def init(
     model = Transformer(model_args)
     device = xm.xla_device()
     model = model.to(device)
+    for i in range(len(model.cache_kvs)):
+        model.cache_kvs[i] = tuple(t.to(device) for t in model.cache_kvs[i])
     torch.set_default_tensor_type(torch.FloatTensor)
     # model.load_state_dict(checkpoint, strict=False)
 

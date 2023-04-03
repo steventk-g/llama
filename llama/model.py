@@ -82,33 +82,35 @@ class Attention(nn.Module):
         self.n_local_heads = args.n_heads // get_model_parallel_world_size()
         self.head_dim = args.dim // args.n_heads
 
+        init_method = torch.nn.init.normal_
+
         self.wq = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
         self.wk = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
         self.wv = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
         self.wo = RowParallelLinear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
             input_is_parallel=True,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
 
         # self.cache_k = torch.zeros(
@@ -172,14 +174,16 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        init_method = torch.nn.init.normal_
+
         self.w1 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+            dim, hidden_dim, bias=False, gather_output=False, init_method=init_method
         )
         self.w2 = RowParallelLinear(
-            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
+            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=init_method
         )
         self.w3 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+            dim, hidden_dim, bias=False, gather_output=False, init_method=init_method
         )
 
     def forward(self, x):
@@ -213,8 +217,10 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
+        init_method = torch.nn.init.normal_
+
         self.tok_embeddings = ParallelEmbedding(
-            params.vocab_size, params.dim, init_method=lambda x: x
+            params.vocab_size, params.dim, init_method=init_method
         )
 
         self.layers = torch.nn.ModuleList()
@@ -223,7 +229,7 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = ColumnParallelLinear(
-            params.dim, params.vocab_size, bias=False, init_method=lambda x: x
+            params.dim, params.vocab_size, bias=False, init_method=init_method
         )
 
         freqs_cis = precompute_freqs_cis(

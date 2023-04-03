@@ -116,23 +116,15 @@ def main(
 #
 #cheese =>""",
     ]
-    with torch.no_grad():
-        results = generator.generate(
-            prompts, max_gen_len=256, temperature=temperature, top_p=top_p
-        )
+    for i in range(2):
+        with torch.no_grad():
+            results = generator.generate(
+                prompts, max_gen_len=256, temperature=temperature, top_p=top_p
+            )
 
-    for result in results:
-        print(result)
-        print("\n==================================\n")
-
-    with torch.no_grad():
-        results = generator.generate(
-            prompts, max_gen_len=256, temperature=temperature, top_p=top_p
-        )
-
-    for result in results:
-        print(result)
-        print("\n==================================\n")
+        for result in results:
+            print(result)
+            print("\n==================================\n")
 
 
 def _fn(

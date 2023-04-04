@@ -81,16 +81,16 @@ class LLaMA:
         input_tokens = tokens.index_select(1, input_pos_tensor)
         cache_kvs = self.model.cache_kvs
         xm.mark_step(wait=True)
-        print(f"Input prepared in {time.time() - input_prepare_start_time:.2f} seconds")
+        print(f"Input prepared in {time.time() - input_prepare_start_time:.5f} seconds")
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
             # with xp.Trace('trace_generate_one_token'):
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs = self._generate_one_token_fn(tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p)
             xm.mark_step()
-            print(f"Generated 1 token in {time.time() - token_start_time:.2f} seconds")
+            print(f"Generated 1 token in {time.time() - token_start_time:.5f} seconds")
         self.model.cache_kvs = cache_kvs
-        print(f"Decoded in {time.time() - decoding_start_time:.2f} seconds")
+        print(f"Decoded in {time.time() - decoding_start_time:.5f} seconds")
 
         output_prepare_start_time = time.time()
         decoded = []
@@ -105,8 +105,8 @@ class LLaMA:
             except ValueError:
                 pass
             decoded.append(self.tokenizer.decode(t))
-        print(f"Detokenized ouput in {time.time() - output_prepare_start_time:.2f} seconds")
-        print(f"Completed in {time.time() - start_time:.2f} seconds")
+        print(f"Detokenized ouput in {time.time() - output_prepare_start_time:.5f} seconds")
+        print(f"Completed in {time.time() - start_time:.5f} seconds")
         return decoded
 
 

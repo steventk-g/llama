@@ -82,7 +82,8 @@ class Attention(nn.Module):
         self.n_local_heads = args.n_heads // get_model_parallel_world_size()
         self.head_dim = args.dim // args.n_heads
 
-        init_method = torch.nn.init.normal_
+        #init_method = torch.nn.init.normal_
+        init_method = lambda x: x
 
         self.wq = ColumnParallelLinear(
             args.dim,
@@ -175,7 +176,8 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        init_method = torch.nn.init.normal_
+        #init_method = torch.nn.init.normal_
+        init_method = lambda x: x
 
         self.w1 = ColumnParallelLinear(
             dim, hidden_dim, bias=False, gather_output=False, init_method=init_method
@@ -219,7 +221,8 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        init_method = torch.nn.init.normal_
+        #init_method = torch.nn.init.normal_
+        init_method = lambda x: x
 
         self.tok_embeddings = ParallelEmbedding(
             params.vocab_size, params.dim, init_method=init_method

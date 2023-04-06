@@ -18,7 +18,8 @@ class LLaMA:
         self.tokenizer = tokenizer
         self._generate_one_token_fn = self._generate_one_token
         #self._generate_one_token_fn = torch.compile(backend="torchxla_trace_once")(self._generate_one_token)
-        self.model = torch.compile(self.model, backend="torchxla_trace_once")
+        xm._init_ordinal_world_size()
+        self.model = torch.compile(self.model, backend="torchxla_trace_once", fullgraph=True)
 
     def _generate_one_token(self, tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p):
         logits, cache_kvs = self.model(input_tokens, input_pos_tensor, output_pos_tensor, cache_kvs)

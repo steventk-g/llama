@@ -217,8 +217,6 @@ class Transformer(nn.Module):
             params.dim, params.vocab_size, bias=False
         )
 
-        self.apply(self._init_weights)
-
         freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
@@ -252,6 +250,3 @@ class Transformer(nn.Module):
         output = self.output(h)
         return output.float()
     
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight)

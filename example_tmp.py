@@ -54,8 +54,6 @@ def init(
     model = Transformer(model_args)
     device = xm.xla_device()
     model = model.to(device)
-    for i in range(len(model.cache_kvs)):
-        model.cache_kvs[i] = tuple(t.to(device) for t in model.cache_kvs[i])
     torch.set_default_tensor_type(torch.FloatTensor)
     # model.load_state_dict(checkpoint, strict=False)
 
@@ -81,12 +79,6 @@ def init(
                 xs.mark_sharding(layer.weight, col_mesh, (0, 1))
         if 'output' in name:
             xs.mark_sharding(layer.weight, col_mesh, (0, 1))
-
-    # TODO(yeounoh) shard cache_kvs before LLaMA init
-    col_mesh = xs.Mesh(device_ids, (1, 1, num_devices, 1))
-    for i in range(len(model.cache_kvs)):
-        for t in model.cache_kvs[i]:
-            xs.mark_sharding(t, col_mesh, (0,1,2,3))
 
     generator = LLaMA(model, tokenizer)
     print(f"Loaded in {time.time() - start_time:.2f} seconds")
@@ -138,8 +130,9 @@ def main(
     ]
     with torch.no_grad():
         results = generator.generate(
-            prompts, max_gen_len=1, temperature=temperature, top_p=top_p
+            prompts, max_gen_len=256, temperature=temperature, top_p=top_p
         )
+
     with torch.no_grad():
         results = generator.generate(
             prompts, max_gen_len=256, temperature=temperature, top_p=top_p

@@ -170,6 +170,8 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        init_method = torch.nn.init.normal_
+
         self.w1 = nn.Linear(
             dim, hidden_dim, bias=False, init_method=init_method
         )
@@ -210,6 +212,8 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+
+        init_method = torch.nn.init.normal_
 
         self.tok_embeddings = nn.Embedding(
             params.vocab_size, params.dim, init_method=init_method

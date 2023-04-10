@@ -81,32 +81,25 @@ class Attention(nn.Module):
         self.n_local_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
 
-        init_method = torch.nn.init.normal_
-
-
         self.wq = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-            init_method=init_method,
         )
         self.wk = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-            init_method=init_method,
         )
         self.wv = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-            init_method=init_method,
         )
         self.wo = nn.Linear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
-            init_method=init_method,
         )
 
         # self.cache_k = torch.zeros(
@@ -170,16 +163,14 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        init_method = torch.nn.init.normal_
-
         self.w1 = nn.Linear(
-            dim, hidden_dim, bias=False, init_method=init_method
+            dim, hidden_dim, bias=False
         )
         self.w2 = nn.Linear(
-            hidden_dim, dim, bias=False, init_method=init_method
+            hidden_dim, dim, bias=False
         )
         self.w3 = nn.Linear(
-            dim, hidden_dim, bias=False, init_method=init_method
+            dim, hidden_dim, bias=False
         )
 
     def forward(self, x):
@@ -213,10 +204,8 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        init_method = torch.nn.init.normal_
-
         self.tok_embeddings = nn.Embedding(
-            params.vocab_size, params.dim, init_method=init_method
+            params.vocab_size, params.dim
         )
 
         self.layers = torch.nn.ModuleList()
@@ -225,8 +214,10 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(
-            params.dim, params.vocab_size, bias=False, init_method=init_method
+            params.dim, params.vocab_size, bias=False
         )
+
+        self.apply(self._init_weights)
 
         freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
@@ -260,3 +251,7 @@ class Transformer(nn.Module):
         # output = self.output(h[:, -1, :])  # only compute last logits
         output = self.output(h)
         return output.float()
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight)

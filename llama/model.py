@@ -81,29 +81,32 @@ class Attention(nn.Module):
         self.n_local_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
 
+        init_method = torch.nn.init.normal_
+
+
         self.wq = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
         self.wk = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
         self.wv = nn.Linear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
         self.wo = nn.Linear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
-            init_method=lambda x: x,
+            init_method=init_method,
         )
 
         # self.cache_k = torch.zeros(
@@ -168,13 +171,13 @@ class FeedForward(nn.Module):
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
         self.w1 = nn.Linear(
-            dim, hidden_dim, bias=False, init_method=lambda x: x
+            dim, hidden_dim, bias=False, init_method=init_method
         )
         self.w2 = nn.Linear(
-            hidden_dim, dim, bias=False, init_method=lambda x: x
+            hidden_dim, dim, bias=False, init_method=init_method
         )
         self.w3 = nn.Linear(
-            dim, hidden_dim, bias=False, init_method=lambda x: x
+            dim, hidden_dim, bias=False, init_method=init_method
         )
 
     def forward(self, x):
@@ -209,7 +212,7 @@ class Transformer(nn.Module):
         self.n_layers = params.n_layers
 
         self.tok_embeddings = nn.Embedding(
-            params.vocab_size, params.dim, init_method=lambda x: x
+            params.vocab_size, params.dim, init_method=init_method
         )
 
         self.layers = torch.nn.ModuleList()
@@ -218,7 +221,7 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(
-            params.dim, params.vocab_size, bias=False, init_method=lambda x: x
+            params.dim, params.vocab_size, bias=False, init_method=init_method
         )
 
         freqs_cis = precompute_freqs_cis(

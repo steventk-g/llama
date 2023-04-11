@@ -7,25 +7,29 @@ import sys
 import torch
 import fire
 import time
-import torch_xla.core.xla_model as xm
-import torch_xla.debug.metrics as met
-import torch_xla.debug.profiler as xp
-import torch_xla.distributed.xla_multiprocessing as xmp
+# import torch_xla.core.xla_model as xm
+# import torch_xla.debug.metrics as met
+# import torch_xla.debug.profiler as xp
+# import torch_xla.distributed.xla_multiprocessing as xmp
 import json
 from pathlib import Path
 
 from llama import ModelArgs, Transformer, Tokenizer, LLaMA
-from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel_world_size
+# from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel_world_size
 
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
-def setup_model_parallel() -> Tuple[int, int]:
+def setup_model_parallel(rank, world_size) -> Tuple[int, int]:
     # assuming model parallelism over the whole world size
-    rank = get_model_parallel_rank()
-    world_size = get_model_parallel_world_size()
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
     # seed must be the same in all processes
     torch.manual_seed(1)
-    return rank, world_size
 
 
 def init(
@@ -60,7 +64,8 @@ def init(
     # torch.set_default_tensor_type(torch.cuda.HalfTensor)  # TODO: this line puts the model to cuda device
     torch.set_default_tensor_type(torch.BFloat16Tensor)
     model = Transformer(model_args)
-    device = xm.xla_device()
+    # device = xm.xla_device()
+    device = "cuda"
     model = model.to(device)
     for i in range(len(model.cache_kvs)):
         model.cache_kvs[i] = tuple(t.to(device) for t in model.cache_kvs[i])
@@ -73,6 +78,8 @@ def init(
 
 
 def main(
+    rank: int,
+    world_size: int,
     tokenizer_path: str,
     temperature: float = 0.8,
     top_p: float = 0.95,
@@ -82,8 +89,8 @@ def main(
     n_layers: int = 32,
     n_heads: int = 32,
 ):
-    server = xp.start_server(9012, only_on_master=False)
-    rank, world_size = setup_model_parallel()
+    # server = xp.start_server(9012, only_on_master=False)
+    setup_model_parallel(rank, world_size)
     if rank > 0:
         sys.stdout = open(os.devnull, "w")
 
@@ -130,7 +137,8 @@ def main(
 
 
 def _fn(
-    idx,
+    rank: int,
+    world_size: int,
     tokenizer_path: str,
     temperature: float = 0.8,
     top_p: float = 0.95,
@@ -140,7 +148,7 @@ def _fn(
     n_layers: int = 32,
     n_heads: int = 32,
 ):
-    main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
+    main(rank, world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
 
 def mp_main(
     mp: bool,
@@ -153,10 +161,12 @@ def mp_main(
     n_layers: int = 32,
     n_heads: int = 32,
 ):
+    world_size = 1
     if mp:
-        xmp.spawn(_fn, args=(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads))
+        world_size = torch.cuda.device_count()
+        mp.spawn(_fn, args=(world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads), nprocs=world_size, join=True)
     else:
-        main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
+        main(0, world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
 
 
 if __name__ == "__main__":

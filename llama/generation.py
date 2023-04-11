@@ -5,8 +5,8 @@ import time
 from typing import List
 
 import torch
-import torch_xla.core.xla_model as xm
-import torch_xla.debug.profiler as xp
+# import torch_xla.core.xla_model as xm
+# import torch_xla.debug.profiler as xp
 
 from llama.tokenizer import Tokenizer
 from llama.model import Transformer
@@ -18,8 +18,8 @@ class LLaMA:
         self.tokenizer = tokenizer
         self._generate_one_token_fn = self._generate_one_token
         #self._generate_one_token_fn = torch.compile(backend="torchxla_trace_once")(self._generate_one_token)
-        xm._init_ordinal_world_size()
-        self.model = torch.compile(self.model, backend="torchxla_trace_once", fullgraph=True)
+        # xm._init_ordinal_world_size()
+        # self.model = torch.compile(self.model, backend="torchxla_trace_once", fullgraph=True)
 
     def _generate_one_token(self, tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p):
         logits, cache_kvs = self.model(input_tokens, input_pos_tensor, output_pos_tensor, cache_kvs)
@@ -71,7 +71,7 @@ class LLaMA:
         tokens = torch.full((params.max_batch_size, total_len), self.tokenizer.pad_id).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
-        device = xm.xla_device()
+        device = "cuda"
         tokens = tokens.to(device)
         input_text_mask = tokens != self.tokenizer.pad_id
         # start_pos = min_prompt_size
@@ -81,14 +81,14 @@ class LLaMA:
         output_pos_tensor = cur_pos_tensor - 1
         input_tokens = tokens.index_select(1, input_pos_tensor)
         cache_kvs = self.model.cache_kvs
-        xm.mark_step(wait=True)
+        # xm.mark_step(wait=True)
         print(f"Input prepared in {time.time() - input_prepare_start_time:.5f} seconds")
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
             # with xp.Trace('trace_generate_one_token'):
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs = self._generate_one_token_fn(tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p)
-            xm.mark_step()
+            # xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.5f} seconds")
         self.model.cache_kvs = cache_kvs
         print(f"Decoded in {time.time() - decoding_start_time:.5f} seconds")

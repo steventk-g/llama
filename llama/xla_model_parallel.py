@@ -4,17 +4,18 @@ import torch
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
-import torch_xla.core.xla_model as xm
+# import torch_xla.core.xla_model as xm
+import torch.distributed as dist
 
 from fairscale.nn.model_parallel.utils import divide_and_check_no_remainder, split_tensor_along_last_dim
 
 
 def get_model_parallel_rank():
-    return xm.get_ordinal()
+    return dist.get_rank()
 
 
 def get_model_parallel_world_size():
-    return xm.xrt_world_size()
+    return dist.get_world_size()
 
 
 def get_model_parallel_group():
@@ -35,7 +36,7 @@ def _reduce(ctx: Any, input_: torch.Tensor) -> torch.Tensor:
         return input_
 
     # All-reduce.
-    input_ = xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
+    # input_ = xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
 
     return input_
 
@@ -66,9 +67,9 @@ def _gather(input_: torch.Tensor) -> torch.Tensor:
     if get_model_parallel_world_size() == 1:
         return input_
 
-    output = xm.all_gather(input_, dim=-1, groups=groups)
+    # output = xm.all_gather(input_, dim=-1, groups=groups)
 
-    return output
+    return input_
 
 
 class _CopyToModelParallelRegion(torch.autograd.Function):
@@ -155,7 +156,7 @@ def my_reduce(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
         return input_
 
     # All-reduce.
-    input_ = xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
+    # input_ = xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
 
     return input_
 
@@ -182,9 +183,9 @@ def my_gather(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
     if world_size == 1:
         return input_
 
-    output = xm.all_gather(input_, dim=-1, groups=groups)
+    # output = xm.all_gather(input_, dim=-1, groups=groups)
 
-    return output
+    return input_
 
 
 def _initialize_affine_weight(

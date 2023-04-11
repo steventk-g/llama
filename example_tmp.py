@@ -18,7 +18,7 @@ from llama import ModelArgs, Transformer, Tokenizer, LLaMA
 # from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel_world_size
 
 import torch.distributed as dist
-import torch.multiprocessing as mp
+import torch.multiprocessing as xmp
 
 def setup_model_parallel(rank, world_size) -> Tuple[int, int]:
     # assuming model parallelism over the whole world size
@@ -65,7 +65,7 @@ def init(
     torch.set_default_tensor_type(torch.BFloat16Tensor)
     model = Transformer(model_args)
     # device = xm.xla_device()
-    device = "cuda"
+    device = f"cuda:{rank}"
     model = model.to(device)
     for i in range(len(model.cache_kvs)):
         model.cache_kvs[i] = tuple(t.to(device) for t in model.cache_kvs[i])
@@ -164,7 +164,7 @@ def mp_main(
     world_size = 1
     if mp:
         world_size = torch.cuda.device_count()
-        mp.spawn(_fn, args=(world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads), nprocs=world_size, join=True)
+        xmp.spawn(_fn, args=(world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads), nprocs=world_size, join=True)
     else:
         main(0, world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)
 

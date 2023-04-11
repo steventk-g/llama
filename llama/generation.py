@@ -11,6 +11,7 @@ import torch
 from llama.tokenizer import Tokenizer
 from llama.model import Transformer
 
+import torch.distributed as dist
 
 class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
@@ -71,7 +72,7 @@ class LLaMA:
         tokens = torch.full((params.max_batch_size, total_len), self.tokenizer.pad_id).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
-        device = "cuda"
+        device = f"cuda:{dist.get_rank()}"
         tokens = tokens.to(device)
         input_text_mask = tokens != self.tokenizer.pad_id
         # start_pos = min_prompt_size

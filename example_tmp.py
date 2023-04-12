@@ -162,8 +162,10 @@ def mp_main(
     n_heads: int = 32,
 ):
     world_size = 1
+    assert torch.cuda.is_available(), "cuda is not available"
     if mp:
         world_size = torch.cuda.device_count()
+        print(f"Spawning {world_size} processes")
         xmp.spawn(_fn, args=(world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads), nprocs=world_size, join=True)
     else:
         main(0, world_size, tokenizer_path, temperature, top_p, max_seq_len, max_batch_size, dim, n_layers, n_heads)

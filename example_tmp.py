@@ -77,8 +77,8 @@ def main(
     prompts = [
         # For these prompts, the expected answer is the natural continuation of the prompt
         "I believe the meaning of life is",
-        "Simply put, the theory of relativity states that ",
-        "Building a website can be done in 10 simple steps:\n",
+        # "Simply put, the theory of relativity states that ",
+        # "Building a website can be done in 10 simple steps:\n",
         # Few shot prompts: https://huggingface.co/blog/few-shot-learning-gpt-neo-and-inference-api
 #        """Tweet: "I hate it when my phone battery dies."
 #Sentiment: Negative

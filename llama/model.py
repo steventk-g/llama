@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import math
 
 import torch
+import torch_xla.core.xla_model as xm
+import torch_xla.experimental.pjrt as pjrt
 from torch import nn
 import torch.nn.functional as F
 
@@ -15,6 +17,9 @@ from fairscale.nn.model_parallel.layers import (
     RowParallelLinear,
     ColumnParallelLinear,
 )
+
+import torch_xla.experimental.xla_sharding as xs
+import numpy as np
 
 
 @dataclass
@@ -78,7 +83,7 @@ class Attention(nn.Module):
         super().__init__()
 
         #self.n_local_heads = args.n_heads // fs_init.get_model_parallel_world_size()  # TODO: this need to be modified for TPU
-        self.n_local_heads = args.n_heads
+        self.n_local_heads = args.n_heads # // xm.xrt_world_size()
         self.head_dim = args.dim // args.n_heads
 
         self.wq = nn.Linear(
@@ -108,20 +113,30 @@ class Attention(nn.Module):
         # self.cache_v = torch.zeros(
         #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
         # )
-        self.register_buffer("cache_k", torch.zeros(
-            (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        ))
-        self.register_buffer("cache_v", torch.zeros(
-            (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        ))
+        # self.register_buffer("cache_k", torch.zeros(
+        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+        # ))
+        # self.register_buffer("cache_v", torch.zeros(
+        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+        # ))
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor, cache_kv):
         bsz, seqlen, _ = x.shape
+        cache_k, cache_v = cache_kv
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # xk, xv should be sharded along the hidden dim,
+        # then with view, we reshape the last local_head dim to head_dim
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+
+        # TODO(yeounoh) column-wise sharding here
+        #num_devices= pjrt.global_device_count()
+        #col_mesh = xs.Mesh(np.arange(num_devices), (1, 1, num_devices, 1))
+        #xs.mark_sharding(xq, col_mesh, (0,1,2,3))
+        #xs.mark_sharding(xk, col_mesh, (0,1,2,3))
+        #xs.mark_sharding(xv, col_mesh, (0,1,2,3))
 
         # xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
@@ -130,13 +145,17 @@ class Attention(nn.Module):
 
         # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
         # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-        self.cache_k.index_copy_(1, input_idexes, xk)
-        self.cache_v.index_copy_(1, input_idexes, xv)
+        # self.cache_k.index_copy_(1, input_idexes, xk)
+        # self.cache_v.index_copy_(1, input_idexes, xv)
+        cache_k = cache_k.index_copy(1, input_idexes, xk)
+        cache_v = cache_v.index_copy(1, input_idexes, xv)
 
         # keys = self.cache_k[:bsz, : start_pos + seqlen]
         # values = self.cache_v[:bsz, : start_pos + seqlen]
-        keys = self.cache_k[:, :]
-        values = self.cache_v[:, :]
+        # keys = self.cache_k[:, :]
+        # values = self.cache_v[:, :]
+        keys = cache_k[:, :]
+        values = cache_v[:, :]
 
         xq = xq.transpose(1, 2)
         keys = keys.transpose(1, 2)
@@ -149,7 +168,7 @@ class Attention(nn.Module):
             1, 2
         ).contiguous().view(bsz, seqlen, -1)
 
-        return self.wo(output)
+        return self.wo(output), (cache_k, cache_v)
 
 
 class FeedForward(nn.Module):
@@ -191,10 +210,11 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor):
-        h = x + self.attention.forward(self.attention_norm(x), freqs_cis, mask, input_idexes)
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor, cache_kv):
+        h, new_cache_kv = self.attention.forward(self.attention_norm(x), freqs_cis, mask, input_idexes, cache_kv)
+        h = x + h
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out
+        return out, new_cache_kv
 
 
 class Transformer(nn.Module):
@@ -209,8 +229,25 @@ class Transformer(nn.Module):
         )
 
         self.layers = torch.nn.ModuleList()
+        self.cache_kvs = []
+        n_local_heads = params.n_heads # // xm.xrt_world_size()
+        head_dim = params.dim // params.n_heads
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
+            # total #heads in a shard -> n_local_heads, cache_k & v are stroing the
+            # sharded versions.
+            cache_k = torch.zeros(
+                (params.max_batch_size, params.max_seq_len, n_local_heads, head_dim)
+            )#.to(xm.xla_device())
+            cache_v = torch.zeros(
+                (params.max_batch_size, params.max_seq_len, n_local_heads, head_dim)
+            )#.to(xm.xla_device())
+            # TODO(yeounoh) column-wise sharding here
+            #num_devices= pjrt.global_device_count()
+            #col_mesh = xs.Mesh(np.arange(num_devices), (1, 1, num_devices, 1))
+            #xs.mark_sharding(cache_k, col_mesh, (0,1,2,3))
+            #xs.mark_sharding(cache_v, col_mesh, (0,1,2,3))
+            self.cache_kvs.append((cache_k, cache_v))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(
@@ -227,7 +264,7 @@ class Transformer(nn.Module):
         self.register_buffer("mask", mask)
 
     @torch.no_grad()
-    def forward(self, tokens: torch.Tensor, input_idexes: torch.Tensor, output_idex: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, input_idexes: torch.Tensor, output_idex: torch.Tensor, cache_kvs):
         bsz, seqlen = tokens.shape
         assert bsz == self.params.max_batch_size
         # print(tokens)
@@ -242,11 +279,13 @@ class Transformer(nn.Module):
             # mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
         mask = self.mask.index_select(2, input_idexes)
 
-        for layer in self.layers:
-            h = layer(h, freqs_cis, mask, input_idexes)
+        new_cache_kvs = []
+        for layer, cache_kv in zip(self.layers, cache_kvs):
+            h, new_cache_kv = layer(h, freqs_cis, mask, input_idexes, cache_kv)
+            new_cache_kvs.append(new_cache_kv)
         h = self.norm(h)
         h = h.index_select(1, output_idex - input_idexes[0]).squeeze(dim=1)
         # output = self.output(h[:, -1, :])  # only compute last logits
         output = self.output(h)
-        return output.float()
-    
+        return output.float(), new_cache_kvs
+

@@ -11,6 +11,10 @@ import torch_xla.debug.profiler as xp
 from llama.tokenizer import Tokenizer
 from llama.model import Transformer
 
+import numpy as np
+import torch_xla.experimental.xla_sharding as xs
+import torch_xla.experimental.pjrt as pjrt
+
 
 class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
@@ -19,9 +23,10 @@ class LLaMA:
         self._generate_one_token_fn = self._generate_one_token
         #self._generate_one_token_fn = torch.compile(backend="torchxla_trace_once")(self._generate_one_token)
         self.model = torch.compile(self.model, backend="torchxla_trace_once")
+        self.num_devices = pjrt.global_device_count()
 
-    def _generate_one_token(self, tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, temperature, top_p):
-        logits = self.model(input_tokens, input_pos_tensor, output_pos_tensor)
+    def _generate_one_token(self, tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p):
+        logits, cache_kvs = self.model(input_tokens, input_pos_tensor, output_pos_tensor, cache_kvs)
         if temperature > 0:
             probs = torch.softmax(logits / temperature, dim=-1)
             next_token = sample_top_p(probs, top_p)
@@ -42,7 +47,7 @@ class LLaMA:
         output_pos_tensor = cur_pos_tensor - 1
         input_tokens = tokens.index_select(1, input_pos_tensor)
 
-        return tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor
+        return tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs
 
     def generate(
         self,
@@ -79,15 +84,25 @@ class LLaMA:
         input_pos_tensor = torch.arange(0, start_pos).to(device)
         output_pos_tensor = cur_pos_tensor - 1
         input_tokens = tokens.index_select(1, input_pos_tensor)
+        cache_kvs = self.model.cache_kvs
         xm.mark_step(wait=True)
         print(f"Input prepared in {time.time() - input_prepare_start_time:.5f} seconds")
+
+        num_devices = self.num_devices
+        col_mesh = xs.Mesh(np.arange(num_devices), (1, 1, num_devices, 1))
+
         decoding_start_time = time.time()
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
+            # TODO(yeounoh) shard cache_kv before token generation
+            for i in range(len(cache_kvs)):
+              for t in cache_kvs[i]:
+                xs.mark_sharding(t, col_mesh, (0,1,2,3))
             # with xp.Trace('trace_generate_one_token'):
-            tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor = self._generate_one_token_fn(tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, temperature, top_p)
+            tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs = self._generate_one_token_fn(tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p)
             xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.5f} seconds")
+        self.model.cache_kvs = cache_kvs
         print(f"Decoded in {time.time() - decoding_start_time:.5f} seconds")
 
         output_prepare_start_time = time.time()

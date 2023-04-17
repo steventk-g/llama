@@ -147,8 +147,8 @@ class Attention(nn.Module):
         # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
         # self.cache_k.index_copy_(1, input_idexes, xk)
         # self.cache_v.index_copy_(1, input_idexes, xv)
-        cache_k = cache_k.index_copy(1, input_idexes, xk).to(xm.xla_device())
-        cache_v = cache_v.index_copy(1, input_idexes, xv).to(xm.xla_device())
+        # cache_k = cache_k.index_copy(1, input_idexes, xk).to(xm.xla_device())
+        # cache_v = cache_v.index_copy(1, input_idexes, xv).to(xm.xla_device())
 
         # keys = self.cache_k[:bsz, : start_pos + seqlen]
         # values = self.cache_v[:bsz, : start_pos + seqlen]

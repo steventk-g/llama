@@ -31,16 +31,16 @@ def init(
     n_heads: int = 32,
 ) -> LLaMA:
     start_time = time.time()
-    # checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
+    checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
     # TODO the checkpoint for large models seems to be sharded as well
-    # assert world_size == len(
-    #     checkpoints
-    # ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {world_size}"
-    # ckpt_path = checkpoints[rank]
+    assert world_size == len(
+        checkpoints
+    ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {world_size}"
+    ckpt_path = checkpoints[rank]
     print("Loading")
-    # checkpoint = torch.load(ckpt_path, map_location="cpu")
-    # with open(Path(ckpt_dir) / "params.json", "r") as f:
-    #     params = json.loads(f.read())
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    with open(Path(ckpt_dir) / "params.json", "r") as f:
+        params = json.loads(f.read())
     params = {"dim": dim,
               "n_layers": n_layers,
               "n_heads": n_heads,

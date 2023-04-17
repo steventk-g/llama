@@ -92,22 +92,22 @@ class LLaMA:
         col_mesh = xs.Mesh(np.arange(num_devices), (1, 1, num_devices, 1))
 
         decoding_start_time = time.time()
-        sharding_times = []
+        # sharding_times = []
         for _ in range(start_pos, total_len):
             token_start_time = time.time()
             # TODO(yeounoh) shard cache_kv before token generation
             # for i in range(len(cache_kvs)):
             #   for t in cache_kvs[i]:
             #     xs.mark_sharding(t, col_mesh, (0,1,2,3))
-            sharding_times.append(time.time() - token_start_time)
-            print(f"Sharded cache KVs in {sharding_times[-1]:.5f} seconds")
+            # sharding_times.append(time.time() - token_start_time)
+            # print(f"Sharded cache KVs in {sharding_times[-1]:.5f} seconds")
             # with xp.Trace('trace_generate_one_token'):
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, _ = self._generate_one_token_fn(tokens, input_tokens, input_text_mask, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs, temperature, top_p)
             xm.mark_step()
             print(f"Generated 1 token in {time.time() - token_start_time:.5f} seconds")
         # self.model.cache_kvs = cache_kvs
         print(f"Decoded in {time.time() - decoding_start_time:.5f} seconds")
-        print(f"Spent {sum(sharding_times):.5f} seconds on sharding cache KVs")
+        # print(f"Spent {sum(sharding_times):.5f} seconds on sharding cache KVs")
         
 
         output_prepare_start_time = time.time()
